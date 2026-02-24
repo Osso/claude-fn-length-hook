@@ -69,7 +69,7 @@ fn handle_rust(file_path: &str) {
 
     let detail = messages.join("\n  - ");
     let reason = format!(
-        "Function body exceeds 30-line limit in {}:\n  - {}\nExtract logic into well-named helper functions.",
+        "Function body exceeds 50-line limit in {}:\n  - {}\nExtract logic into well-named helper functions.",
         short, detail
     );
     block(&reason);

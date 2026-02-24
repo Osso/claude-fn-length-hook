@@ -1,6 +1,6 @@
 use crate::lines::is_countable;
 
-pub const BODY_LIMIT: usize = 30;
+pub const BODY_LIMIT: usize = 50;
 pub const FILE_LINE_LIMIT: usize = 750;
 
 #[derive(Debug)]
