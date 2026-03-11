@@ -9,110 +9,112 @@ use std::process;
 
 #[derive(Deserialize)]
 struct HookInput {
-    tool_input: ToolInput,
-}
-
-#[derive(Deserialize)]
-struct ToolInput {
-    file_path: String,
+    tool_name: Option<String>,
+    tool_input: serde_json::Value,
 }
 
 fn main() {
     let input = read_stdin_json();
-    let file_path = &input.tool_input.file_path;
+    let file_path = match extract_file_path(&input) {
+        Some(p) => p,
+        None => return,
+    };
 
-    let ext = Path::new(file_path)
+    let ext = Path::new(&file_path)
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("");
 
-    match ext {
-        "rs" => handle_rust(file_path),
-        "php" => handle_php(file_path),
-        _ => {}
+    if !matches!(ext, "rs" | "php") {
+        return;
+    }
+
+    let (before, after) = match resolve_content(&input, &file_path) {
+        Some(pair) => pair,
+        None => return,
+    };
+
+    let messages = match ext {
+        "rs" => check_rust(before.as_deref(), &after),
+        "php" => check_php(before.as_deref(), &after),
+        _ => return,
+    };
+
+    if !messages.is_empty() {
+        block(&format_block_message(&file_path, &messages));
     }
 }
 
-fn read_stdin_json() -> HookInput {
-    let mut buf = String::new();
-    io::stdin().read_to_string(&mut buf).unwrap_or(0);
-    serde_json::from_str(&buf).unwrap_or_else(|_| process::exit(0))
+fn extract_file_path(input: &HookInput) -> Option<String> {
+    input
+        .tool_input
+        .get("file_path")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
 }
 
-fn handle_rust(file_path: &str) {
-    let source = match std::fs::read_to_string(file_path) {
-        Ok(s) => s,
-        Err(_) => return,
-    };
+/// Simulate the edit to get (before, after) content.
+fn resolve_content(input: &HookInput, file_path: &str) -> Option<(Option<String>, String)> {
+    let tool = input.tool_name.as_deref().unwrap_or("Edit");
+    let before = std::fs::read_to_string(file_path).ok();
 
-    let result = rust_parser::check(&source);
+    match tool {
+        "Edit" => resolve_edit(&input.tool_input, before),
+        "Write" => resolve_write(&input.tool_input, before),
+        _ => None,
+    }
+}
+
+fn resolve_edit(
+    tool_input: &serde_json::Value,
+    before: Option<String>,
+) -> Option<(Option<String>, String)> {
+    let old_str = tool_input.get("old_string")?.as_str()?;
+    let new_str = tool_input.get("new_string")?.as_str()?;
+    let current = before.as_ref()?;
+    let after = current.replacen(old_str, new_str, 1);
+    Some((before, after))
+}
+
+fn resolve_write(
+    tool_input: &serde_json::Value,
+    before: Option<String>,
+) -> Option<(Option<String>, String)> {
+    let content = tool_input.get("content")?.as_str()?.to_string();
+    Some((before, content))
+}
+
+fn check_rust(before: Option<&str>, after: &str) -> Vec<String> {
     let mut messages: Vec<String> = Vec::new();
+    let result = rust_parser::check(after);
 
-    format_fn_violations_rust(&result.fn_violations, file_path, &mut messages);
+    for v in &result.fn_violations {
+        messages.push(format!("{} (line {}): {} body lines", v.name, v.line, v.body_lines));
+    }
 
-    if result.file_lines > rust_parser::FILE_LINE_LIMIT {
+    check_file_length(before, result.file_lines, &mut messages);
+    messages
+}
+
+fn check_file_length(before: Option<&str>, after_lines: usize, messages: &mut Vec<String>) {
+    if after_lines <= rust_parser::FILE_LINE_LIMIT {
+        return;
+    }
+    let before_lines = before.map(|s| s.lines().count()).unwrap_or(0);
+    if before_lines <= rust_parser::FILE_LINE_LIMIT || after_lines > before_lines {
         messages.push(format!(
             "File is {} lines (max {}). Consider splitting it.",
-            result.file_lines,
+            after_lines,
             rust_parser::FILE_LINE_LIMIT
         ));
     }
-
-    if messages.is_empty() {
-        return;
-    }
-
-    let short = Path::new(file_path)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or(file_path);
-
-    let detail = messages.join("\n  - ");
-    let reason = format!(
-        "Function body exceeds 30-line limit in {}:\n  - {}\nExtract logic into well-named helper functions.",
-        short, detail
-    );
-    block(&reason);
 }
 
-fn format_fn_violations_rust(
-    violations: &[rust_parser::Violation],
-    _file_path: &str,
-    messages: &mut Vec<String>,
-) {
-    for v in violations {
-        messages.push(format!(
-            "{} (line {}): {} body lines",
-            v.name, v.line, v.body_lines
-        ));
-    }
-}
-
-fn handle_php(file_path: &str) {
-    let source = match std::fs::read_to_string(file_path) {
-        Ok(s) => s,
-        Err(_) => return,
-    };
-
-    let old_source = fetch_committed_php(file_path);
-    let violations = php_parser::check(&source, old_source.as_deref());
-
-    if violations.is_empty() {
-        return;
-    }
-
-    let short = Path::new(file_path)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or(file_path);
-
-    let details: Vec<String> = violations.iter().map(format_php_violation).collect();
-    let detail = details.join("\n  - ");
-    let reason = format!(
-        "Function length violation in {}:\n  - {}\nNew functions: max 30 lines. Legacy functions: do not increase length.",
-        short, detail
-    );
-    block(&reason);
+fn check_php(before: Option<&str>, after: &str) -> Vec<String> {
+    php_parser::check(after, before)
+        .iter()
+        .map(format_php_violation)
+        .collect()
 }
 
 fn format_php_violation(v: &php_parser::Violation) -> String {
@@ -123,40 +125,27 @@ fn format_php_violation(v: &php_parser::Violation) -> String {
         ),
         _ => format!(
             "{} (line {}): {} body lines (max {})",
-            v.name,
-            v.line,
-            v.body_lines,
-            php_parser::BODY_LIMIT
+            v.name, v.line, v.body_lines, php_parser::BODY_LIMIT
         ),
     }
 }
 
-fn fetch_committed_php(file_path: &str) -> Option<String> {
-    let repo_root = find_git_root(file_path)?;
-    let rel = Path::new(file_path).strip_prefix(&repo_root).ok()?;
-    let rel_str = rel.to_str()?;
-
-    let output = process::Command::new("git")
-        .args(["show", &format!("HEAD:{}", rel_str)])
-        .current_dir(&repo_root)
-        .output()
-        .ok()?;
-
-    if output.status.success() {
-        String::from_utf8(output.stdout).ok()
-    } else {
-        None
-    }
+fn format_block_message(file_path: &str, messages: &[String]) -> String {
+    let short = Path::new(file_path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(file_path);
+    let detail = messages.join("\n  - ");
+    format!(
+        "Function body exceeds 30-line limit in {}:\n  - {}\nExtract logic into well-named helper functions.",
+        short, detail
+    )
 }
 
-fn find_git_root(file_path: &str) -> Option<std::path::PathBuf> {
-    let mut dir = Path::new(file_path).parent()?;
-    loop {
-        if dir.join(".git").exists() {
-            return Some(dir.to_path_buf());
-        }
-        dir = dir.parent()?;
-    }
+fn read_stdin_json() -> HookInput {
+    let mut buf = String::new();
+    io::stdin().read_to_string(&mut buf).unwrap_or(0);
+    serde_json::from_str(&buf).unwrap_or_else(|_| process::exit(0))
 }
 
 fn block(reason: &str) {
