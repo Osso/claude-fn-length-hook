@@ -83,7 +83,7 @@ fn extract_fn_name(line: &str, line_idx: usize) -> Option<(String, usize)> {
     if trimmed.starts_with("//") || trimmed.starts_with('*') || trimmed.starts_with("/*") {
         return None;
     }
-    let pos = trimmed.find("fn ")?;
+    let pos = find_keyword_position(trimmed, "fn ")?;
     let after = &trimmed[pos + 3..];
     let name_end = after
         .find(|c: char| !c.is_alphanumeric() && c != '_')
@@ -92,6 +92,21 @@ fn extract_fn_name(line: &str, line_idx: usize) -> Option<(String, usize)> {
         return None;
     }
     Some((after[..name_end].to_string(), line_idx))
+}
+
+fn find_keyword_position(line: &str, keyword: &str) -> Option<usize> {
+    let keyword_pos = line.find(keyword)?;
+    let stop_pos = ["//", "/*", "\"", "'"]
+        .into_iter()
+        .filter_map(|marker| line.find(marker))
+        .min()
+        .unwrap_or(line.len());
+
+    if keyword_pos < stop_pos {
+        Some(keyword_pos)
+    } else {
+        None
+    }
 }
 
 /// Scan forward from `start` to find the `{` that opens the function body.
@@ -185,4 +200,14 @@ fn update_block_comment_state(line: &str, in_bc: &mut bool) {
         &mut dummy_str,
         &mut dummy_char,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ignores_fn_keyword_inside_top_level_string_literal() {
+        assert_eq!(extract_fn_name(r#"const MSG: &str = "fn fake";"#, 0), None);
+    }
 }

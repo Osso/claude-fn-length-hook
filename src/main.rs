@@ -156,3 +156,54 @@ fn block(reason: &str) {
     println!("{}", output);
     process::exit(0);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_edit_replaces_old_string_in_simulated_output() {
+        let input = serde_json::json!({
+            "old_string": "before",
+            "new_string": "after"
+        });
+
+        let (before, after) = resolve_edit(&input, Some("before value".to_string())).unwrap();
+
+        assert_eq!(before.as_deref(), Some("before value"));
+        assert_eq!(after, "after value");
+    }
+
+    #[test]
+    fn resolve_write_uses_full_replacement_content() {
+        let input = serde_json::json!({
+            "content": "new file contents"
+        });
+
+        let (before, after) = resolve_write(&input, Some("old file contents".to_string())).unwrap();
+
+        assert_eq!(before.as_deref(), Some("old file contents"));
+        assert_eq!(after, "new file contents");
+    }
+
+    #[test]
+    fn check_file_length_allows_legacy_oversized_file_without_growth() {
+        let before = vec!["x"; rust_parser::FILE_LINE_LIMIT + 5].join("\n");
+        let mut messages = Vec::new();
+
+        check_file_length(Some(&before), rust_parser::FILE_LINE_LIMIT + 5, &mut messages);
+
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn check_file_length_blocks_legacy_oversized_file_growth() {
+        let before = vec!["x"; rust_parser::FILE_LINE_LIMIT + 5].join("\n");
+        let mut messages = Vec::new();
+
+        check_file_length(Some(&before), rust_parser::FILE_LINE_LIMIT + 6, &mut messages);
+
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].contains("max 750"));
+    }
+}

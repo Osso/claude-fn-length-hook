@@ -84,7 +84,7 @@ fn extract_php_fn_name(line: &str, line_idx: usize, in_bc: bool) -> Option<(Stri
     if trimmed.starts_with("//") || trimmed.starts_with('*') || trimmed.starts_with("/*") {
         return None;
     }
-    let pos = trimmed.find("function ")?;
+    let pos = find_keyword_position(trimmed, "function ")?;
     let after = &trimmed[pos + 9..];
     // Skip `&` for reference returns
     let after = after.trim_start_matches('&').trim();
@@ -95,6 +95,21 @@ fn extract_php_fn_name(line: &str, line_idx: usize, in_bc: bool) -> Option<(Stri
         return None;
     }
     Some((after[..name_end].to_string(), line_idx + 1))
+}
+
+fn find_keyword_position(line: &str, keyword: &str) -> Option<usize> {
+    let keyword_pos = line.find(keyword)?;
+    let stop_pos = ["//", "/*", "#", "\"", "'"]
+        .into_iter()
+        .filter_map(|marker| line.find(marker))
+        .min()
+        .unwrap_or(line.len());
+
+    if keyword_pos < stop_pos {
+        Some(keyword_pos)
+    } else {
+        None
+    }
 }
 
 /// Find the `{` that opens a function body, scanning up to 10 lines forward.
@@ -183,4 +198,43 @@ fn update_block_comment_state(line: &str, in_bc: &mut bool) {
     let mut dummy_str = false;
     let mut dummy_char = '"';
     update_depth(line, &mut dummy, in_bc, &mut dummy_str, &mut dummy_char);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn php_function_with_counted_lines(name: &str, count: usize) -> String {
+        let body = vec!["    $x++;"; count].join("\n");
+        format!("function {}() {{\n{}\n}}", name, body)
+    }
+
+    #[test]
+    fn allows_legacy_php_function_to_stay_same_size_over_limit() {
+        let source = php_function_with_counted_lines("legacy_demo", BODY_LIMIT + 1);
+
+        let violations = check(&source, Some(&source));
+
+        assert!(violations.is_empty());
+    }
+
+    #[test]
+    fn blocks_legacy_php_function_when_it_grows_past_previous_size() {
+        let old_source = php_function_with_counted_lines("legacy_demo", BODY_LIMIT + 1);
+        let new_source = php_function_with_counted_lines("legacy_demo", BODY_LIMIT + 2);
+
+        let violations = check(&new_source, Some(&old_source));
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].name, "legacy_demo");
+        assert_eq!(violations[0].old_body_lines, Some(BODY_LIMIT + 1));
+    }
+
+    #[test]
+    fn ignores_function_keyword_inside_top_level_string_literal() {
+        assert_eq!(
+            extract_php_fn_name(r#"$msg = "function fake";"#, 0, false),
+            None
+        );
+    }
 }
