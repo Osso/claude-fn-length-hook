@@ -36,7 +36,7 @@ fn main() {
 
     let messages = match ext {
         "rs" => check_rust(before.as_deref(), &after),
-        "php" => check_php(before.as_deref(), &after),
+        "php" => check_php(before.as_deref(), &after, &file_path),
         _ => return,
     };
 
@@ -89,7 +89,11 @@ fn check_rust(before: Option<&str>, after: &str) -> Vec<String> {
     let result = rust_parser::check(after);
 
     for v in &result.fn_violations {
-        messages.push(format!("{} (line {}): {} body lines", v.name, v.line, v.body_lines));
+        let limit = if v.is_test { rust_parser::TEST_BODY_LIMIT } else { rust_parser::BODY_LIMIT };
+        messages.push(format!(
+            "{} (line {}): {} body lines (max {})",
+            v.name, v.line, v.body_lines, limit
+        ));
     }
 
     check_file_length(before, result.file_lines, &mut messages);
@@ -110,22 +114,24 @@ fn check_file_length(before: Option<&str>, after_lines: usize, messages: &mut Ve
     }
 }
 
-fn check_php(before: Option<&str>, after: &str) -> Vec<String> {
-    php_parser::check(after, before)
+fn check_php(before: Option<&str>, after: &str, file_path: &str) -> Vec<String> {
+    let is_test_file = file_path.ends_with("Test.php") || file_path.ends_with("Cest.php");
+    php_parser::check(after, before, is_test_file)
         .iter()
-        .map(format_php_violation)
+        .map(|v| format_php_violation(v, is_test_file))
         .collect()
 }
 
-fn format_php_violation(v: &php_parser::Violation) -> String {
+fn format_php_violation(v: &php_parser::Violation, is_test_file: bool) -> String {
+    let applicable_limit = if is_test_file { php_parser::TEST_BODY_LIMIT } else { php_parser::BODY_LIMIT };
     match v.old_body_lines {
-        Some(old) if old > php_parser::BODY_LIMIT => format!(
+        Some(old) if old > applicable_limit => format!(
             "{} (line {}): {} body lines (was {}, cannot grow legacy function)",
             v.name, v.line, v.body_lines, old
         ),
         _ => format!(
             "{} (line {}): {} body lines (max {})",
-            v.name, v.line, v.body_lines, php_parser::BODY_LIMIT
+            v.name, v.line, v.body_lines, applicable_limit
         ),
     }
 }
@@ -137,7 +143,7 @@ fn format_block_message(file_path: &str, messages: &[String]) -> String {
         .unwrap_or(file_path);
     let detail = messages.join("\n  - ");
     format!(
-        "Function body exceeds 30-line limit in {}:\n  - {}\nExtract logic into well-named helper functions.",
+        "Function body exceeds limit in {}:\n  - {}\nExtract logic into well-named helper functions.",
         short, detail
     )
 }

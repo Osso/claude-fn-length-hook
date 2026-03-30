@@ -2,6 +2,7 @@ use crate::lines::is_countable;
 use std::collections::HashMap;
 
 pub const BODY_LIMIT: usize = 30;
+pub const TEST_BODY_LIMIT: usize = 200;
 
 #[derive(Debug)]
 pub struct Violation {
@@ -12,10 +13,10 @@ pub struct Violation {
 }
 
 /// Parse PHP source and check against legacy-aware limits.
-pub fn check(source: &str, old_source: Option<&str>) -> Vec<Violation> {
+pub fn check(source: &str, old_source: Option<&str>, is_test_file: bool) -> Vec<Violation> {
     let fns = parse_functions(source);
     let old_fns = old_source.map(parse_functions).unwrap_or_default();
-    collect_violations(fns, old_fns)
+    collect_violations(fns, old_fns, is_test_file)
 }
 
 #[derive(Debug)]
@@ -27,11 +28,13 @@ struct FnInfo {
 fn collect_violations(
     fns: HashMap<String, FnInfo>,
     old_fns: HashMap<String, FnInfo>,
+    is_test_file: bool,
 ) -> Vec<Violation> {
+    let applicable_limit = if is_test_file { TEST_BODY_LIMIT } else { BODY_LIMIT };
     let mut violations = Vec::new();
     for (name, info) in &fns {
         let old_len = old_fns.get(name).map(|f| f.body_lines);
-        let limit = old_len.map(|l| l.max(BODY_LIMIT)).unwrap_or(BODY_LIMIT);
+        let limit = old_len.map(|l| l.max(applicable_limit)).unwrap_or(applicable_limit);
         if info.body_lines > limit {
             violations.push(Violation {
                 name: name.clone(),
@@ -213,7 +216,7 @@ mod tests {
     fn allows_legacy_php_function_to_stay_same_size_over_limit() {
         let source = php_function_with_counted_lines("legacy_demo", BODY_LIMIT + 1);
 
-        let violations = check(&source, Some(&source));
+        let violations = check(&source, Some(&source), false);
 
         assert!(violations.is_empty());
     }
@@ -223,11 +226,39 @@ mod tests {
         let old_source = php_function_with_counted_lines("legacy_demo", BODY_LIMIT + 1);
         let new_source = php_function_with_counted_lines("legacy_demo", BODY_LIMIT + 2);
 
-        let violations = check(&new_source, Some(&old_source));
+        let violations = check(&new_source, Some(&old_source), false);
 
         assert_eq!(violations.len(), 1);
         assert_eq!(violations[0].name, "legacy_demo");
         assert_eq!(violations[0].old_body_lines, Some(BODY_LIMIT + 1));
+    }
+
+    #[test]
+    fn allows_test_file_function_up_to_test_body_limit() {
+        let source = php_function_with_counted_lines("test_demo", TEST_BODY_LIMIT);
+
+        let violations = check(&source, None, true);
+
+        assert!(violations.is_empty());
+    }
+
+    #[test]
+    fn blocks_test_file_function_over_test_body_limit() {
+        let source = php_function_with_counted_lines("test_demo", TEST_BODY_LIMIT + 1);
+
+        let violations = check(&source, None, true);
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].name, "test_demo");
+    }
+
+    #[test]
+    fn blocks_normal_file_function_at_normal_limit() {
+        let source = php_function_with_counted_lines("normal_demo", BODY_LIMIT + 1);
+
+        let violations = check(&source, None, false);
+
+        assert_eq!(violations.len(), 1);
     }
 
     #[test]

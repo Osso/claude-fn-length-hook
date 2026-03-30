@@ -1,6 +1,7 @@
 use crate::lines::is_countable;
 
 pub const BODY_LIMIT: usize = 30;
+pub const TEST_BODY_LIMIT: usize = 200;
 pub const FILE_LINE_LIMIT: usize = 750;
 
 #[derive(Debug)]
@@ -8,6 +9,7 @@ pub struct Violation {
     pub name: String,
     pub line: usize,
     pub body_lines: usize,
+    pub is_test: bool,
 }
 
 pub struct RustViolations {
@@ -37,7 +39,8 @@ fn find_fn_violations(lines: &[&str]) -> Vec<Violation> {
 
         // Track block comments so we don't pick up `fn` inside them
         if let Some(viol) = try_parse_fn(lines, &mut i, &mut in_block_comment) {
-            if viol.body_lines > BODY_LIMIT {
+            let limit = if viol.is_test { TEST_BODY_LIMIT } else { BODY_LIMIT };
+            if viol.body_lines > limit {
                 violations.push(viol);
             }
         } else {
@@ -62,6 +65,8 @@ fn try_parse_fn(lines: &[&str], i: &mut usize, in_block_comment: &mut bool) -> O
 
     let (name, fn_line) = extract_fn_name(line, *i)?;
 
+    let is_test = preceding_lines_have_test_attr(lines, *i);
+
     // Find opening brace of function body (may be on same line or next few)
     let open_idx = find_opening_brace(lines, *i)?;
 
@@ -72,7 +77,31 @@ fn try_parse_fn(lines: &[&str], i: &mut usize, in_block_comment: &mut bool) -> O
         name,
         line: fn_line + 1,
         body_lines,
+        is_test,
     })
+}
+
+/// Walk backwards from `fn_line` skipping blank lines to check for test attributes.
+fn preceding_lines_have_test_attr(lines: &[&str], fn_line: usize) -> bool {
+    let mut idx = fn_line;
+    loop {
+        if idx == 0 {
+            break;
+        }
+        idx -= 1;
+        let trimmed = lines[idx].trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed == "#[test]" || trimmed == "#[tokio::test]" {
+            return true;
+        }
+        // Stop at anything that isn't an attribute
+        if !trimmed.starts_with('#') {
+            break;
+        }
+    }
+    false
 }
 
 /// Extract function name from a line containing `fn <name>`.
@@ -209,5 +238,68 @@ mod tests {
     #[test]
     fn ignores_fn_keyword_inside_top_level_string_literal() {
         assert_eq!(extract_fn_name(r#"const MSG: &str = "fn fake";"#, 0), None);
+    }
+
+    fn rust_function_with_counted_lines(name: &str, count: usize) -> String {
+        let body = vec!["    let value = 1;"; count].join("\n");
+        format!("fn {name}() {{\n{body}\n}}\n")
+    }
+
+    fn test_function_with_counted_lines(name: &str, count: usize) -> String {
+        let body = vec!["    let value = 1;"; count].join("\n");
+        format!("#[test]\nfn {name}() {{\n{body}\n}}\n")
+    }
+
+    fn tokio_test_function_with_counted_lines(name: &str, count: usize) -> String {
+        let body = vec!["    let value = 1;"; count].join("\n");
+        format!("#[tokio::test]\nfn {name}() {{\n{body}\n}}\n")
+    }
+
+    #[test]
+    fn allows_test_fn_up_to_test_body_limit() {
+        let source = test_function_with_counted_lines("my_test", TEST_BODY_LIMIT);
+        let result = check(&source);
+        assert!(result.fn_violations.is_empty());
+    }
+
+    #[test]
+    fn blocks_test_fn_over_test_body_limit() {
+        let source = test_function_with_counted_lines("my_test", TEST_BODY_LIMIT + 1);
+        let result = check(&source);
+        assert_eq!(result.fn_violations.len(), 1);
+        assert!(result.fn_violations[0].is_test);
+    }
+
+    #[test]
+    fn allows_tokio_test_fn_up_to_test_body_limit() {
+        let source = tokio_test_function_with_counted_lines("my_async_test", TEST_BODY_LIMIT);
+        let result = check(&source);
+        assert!(result.fn_violations.is_empty());
+    }
+
+    #[test]
+    fn normal_fn_still_blocked_at_normal_limit() {
+        let source = rust_function_with_counted_lines("normal_fn", BODY_LIMIT + 1);
+        let result = check(&source);
+        assert_eq!(result.fn_violations.len(), 1);
+        assert!(!result.fn_violations[0].is_test);
+    }
+
+    #[test]
+    fn preceding_lines_have_test_attr_detects_test() {
+        let lines: Vec<&str> = "#[test]\nfn my_test() {}".lines().collect();
+        assert!(preceding_lines_have_test_attr(&lines, 1));
+    }
+
+    #[test]
+    fn preceding_lines_have_test_attr_detects_tokio_test() {
+        let lines: Vec<&str> = "#[tokio::test]\nfn my_test() {}".lines().collect();
+        assert!(preceding_lines_have_test_attr(&lines, 1));
+    }
+
+    #[test]
+    fn preceding_lines_have_test_attr_returns_false_for_normal_fn() {
+        let lines: Vec<&str> = "fn normal() {}".lines().collect();
+        assert!(!preceding_lines_have_test_attr(&lines, 0));
     }
 }

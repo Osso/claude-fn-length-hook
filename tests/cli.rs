@@ -41,6 +41,16 @@ fn rust_function_with_counted_lines(name: &str, count: usize) -> String {
     format!("fn {name}() {{\n{body}\n}}\n")
 }
 
+fn rust_test_function_with_counted_lines(name: &str, count: usize) -> String {
+    let body = vec!["    let value = 1;"; count].join("\n");
+    format!("#[test]\nfn {name}() {{\n{body}\n}}\n")
+}
+
+fn php_function_with_counted_lines(name: &str, count: usize) -> String {
+    let body = vec!["    $x++;"; count].join("\n");
+    format!("<?php\nfunction {name}() {{\n{body}\n}}\n")
+}
+
 #[test]
 fn write_payload_allows_small_rust_file_without_block_output() {
     let dir = temp_test_dir("write-allow");
@@ -107,4 +117,64 @@ fn edit_payload_simulates_updated_content_before_writing_to_disk() {
     assert!(stdout.contains("\"decision\":\"block\""));
     assert!(stdout.contains("edit_demo"));
     assert_eq!(on_disk, rust_function_with_counted_lines("edit_demo", 2));
+}
+
+#[test]
+fn rust_test_fn_with_50_body_lines_is_allowed() {
+    let dir = temp_test_dir("rust-test-allow");
+    let file_path = dir.join("sample.rs");
+
+    let payload = serde_json::json!({
+        "tool_name": "Write",
+        "tool_input": {
+            "file_path": file_path,
+            "content": rust_test_function_with_counted_lines("my_test", 50)
+        }
+    });
+
+    let output = run_hook(&payload);
+
+    assert!(output.status.success());
+    assert!(String::from_utf8(output.stdout).unwrap().trim().is_empty());
+}
+
+#[test]
+fn rust_test_fn_with_201_body_lines_is_blocked() {
+    let dir = temp_test_dir("rust-test-block");
+    let file_path = dir.join("sample.rs");
+
+    let payload = serde_json::json!({
+        "tool_name": "Write",
+        "tool_input": {
+            "file_path": file_path,
+            "content": rust_test_function_with_counted_lines("my_test", 201)
+        }
+    });
+
+    let output = run_hook(&payload);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+
+    assert!(output.status.success());
+    assert!(stdout.contains("\"decision\":\"block\""));
+    assert!(stdout.contains("my_test"));
+    assert!(stdout.contains("max 200"));
+}
+
+#[test]
+fn php_test_file_with_50_line_function_is_allowed() {
+    let dir = temp_test_dir("php-test-allow");
+    let file_path = dir.join("FooTest.php");
+
+    let payload = serde_json::json!({
+        "tool_name": "Write",
+        "tool_input": {
+            "file_path": file_path,
+            "content": php_function_with_counted_lines("test_something", 50)
+        }
+    });
+
+    let output = run_hook(&payload);
+
+    assert!(output.status.success());
+    assert!(String::from_utf8(output.stdout).unwrap().trim().is_empty());
 }
