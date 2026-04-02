@@ -39,7 +39,11 @@ fn find_fn_violations(lines: &[&str]) -> Vec<Violation> {
 
         // Track block comments so we don't pick up `fn` inside them
         if let Some(viol) = try_parse_fn(lines, &mut i, &mut in_block_comment) {
-            let limit = if viol.is_test { TEST_BODY_LIMIT } else { BODY_LIMIT };
+            let limit = if viol.is_test {
+                TEST_BODY_LIMIT
+            } else {
+                BODY_LIMIT
+            };
             if viol.body_lines > limit {
                 violations.push(viol);
             }

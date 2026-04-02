@@ -30,11 +30,17 @@ fn collect_violations(
     old_fns: HashMap<String, FnInfo>,
     is_test_file: bool,
 ) -> Vec<Violation> {
-    let applicable_limit = if is_test_file { TEST_BODY_LIMIT } else { BODY_LIMIT };
+    let applicable_limit = if is_test_file {
+        TEST_BODY_LIMIT
+    } else {
+        BODY_LIMIT
+    };
     let mut violations = Vec::new();
     for (name, info) in &fns {
         let old_len = old_fns.get(name).map(|f| f.body_lines);
-        let limit = old_len.map(|l| l.max(applicable_limit)).unwrap_or(applicable_limit);
+        let limit = old_len
+            .map(|l| l.max(applicable_limit))
+            .unwrap_or(applicable_limit);
         if info.body_lines > limit {
             violations.push(Violation {
                 name: name.clone(),

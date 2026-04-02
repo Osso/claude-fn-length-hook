@@ -3,8 +3,9 @@ mod php_parser;
 mod rust_parser;
 
 use serde::Deserialize;
-use std::io::{self, Read};
-use std::path::Path;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Read, Write as IoWrite};
+use std::path::{Path, PathBuf};
 use std::process;
 
 #[derive(Deserialize)]
@@ -41,7 +42,7 @@ fn main() {
     };
 
     if !messages.is_empty() {
-        block(&format_block_message(&file_path, &messages));
+        append_plan_todos(&file_path, &messages);
     }
 }
 
@@ -89,7 +90,11 @@ fn check_rust(before: Option<&str>, after: &str) -> Vec<String> {
     let result = rust_parser::check(after);
 
     for v in &result.fn_violations {
-        let limit = if v.is_test { rust_parser::TEST_BODY_LIMIT } else { rust_parser::BODY_LIMIT };
+        let limit = if v.is_test {
+            rust_parser::TEST_BODY_LIMIT
+        } else {
+            rust_parser::BODY_LIMIT
+        };
         messages.push(format!(
             "{} (line {}): {} body lines (max {})",
             v.name, v.line, v.body_lines, limit
@@ -123,7 +128,11 @@ fn check_php(before: Option<&str>, after: &str, file_path: &str) -> Vec<String> 
 }
 
 fn format_php_violation(v: &php_parser::Violation, is_test_file: bool) -> String {
-    let applicable_limit = if is_test_file { php_parser::TEST_BODY_LIMIT } else { php_parser::BODY_LIMIT };
+    let applicable_limit = if is_test_file {
+        php_parser::TEST_BODY_LIMIT
+    } else {
+        php_parser::BODY_LIMIT
+    };
     match v.old_body_lines {
         Some(old) if old > applicable_limit => format!(
             "{} (line {}): {} body lines (was {}, cannot grow legacy function)",
@@ -136,31 +145,57 @@ fn format_php_violation(v: &php_parser::Violation, is_test_file: bool) -> String
     }
 }
 
-fn format_block_message(file_path: &str, messages: &[String]) -> String {
-    let short = Path::new(file_path)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or(file_path);
-    let detail = messages.join("\n  - ");
-    format!(
-        "Function body exceeds limit in {}:\n  - {}\nExtract logic into well-named helper functions.",
-        short, detail
-    )
-}
-
 fn read_stdin_json() -> HookInput {
     let mut buf = String::new();
     io::stdin().read_to_string(&mut buf).unwrap_or(0);
     serde_json::from_str(&buf).unwrap_or_else(|_| process::exit(0))
 }
 
-fn block(reason: &str) {
-    let output = serde_json::json!({
-        "decision": "block",
-        "reason": reason
-    });
-    println!("{}", output);
-    process::exit(0);
+fn find_project_root(file_path: &str) -> Option<PathBuf> {
+    let mut dir = Path::new(file_path).parent()?;
+    loop {
+        if dir.join(".git").exists() {
+            return Some(dir.to_path_buf());
+        }
+        dir = dir.parent()?;
+    }
+}
+
+fn append_plan_todos(file_path: &str, messages: &[String]) {
+    let root = match find_project_root(file_path) {
+        Some(r) => r,
+        None => return,
+    };
+    let plan_path = root.join("PLAN.md");
+    let short = Path::new(file_path)
+        .strip_prefix(&root)
+        .unwrap_or(Path::new(file_path))
+        .to_string_lossy();
+
+    let mut todos = Vec::new();
+    for msg in messages {
+        let todo = format!(
+            "- [ ] Refactor `{}`: {} — extract into helper functions\n",
+            short, msg
+        );
+        todos.push(todo);
+    }
+
+    let existing = fs::read_to_string(&plan_path).unwrap_or_default();
+    for todo in &todos {
+        if existing.contains(todo.trim_end()) {
+            continue;
+        }
+        let mut file = match OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&plan_path)
+        {
+            Ok(f) => f,
+            Err(_) => return,
+        };
+        let _ = file.write_all(todo.as_bytes());
+    }
 }
 
 #[cfg(test)]
@@ -197,7 +232,11 @@ mod tests {
         let before = vec!["x"; rust_parser::FILE_LINE_LIMIT + 5].join("\n");
         let mut messages = Vec::new();
 
-        check_file_length(Some(&before), rust_parser::FILE_LINE_LIMIT + 5, &mut messages);
+        check_file_length(
+            Some(&before),
+            rust_parser::FILE_LINE_LIMIT + 5,
+            &mut messages,
+        );
 
         assert!(messages.is_empty());
     }
@@ -207,7 +246,11 @@ mod tests {
         let before = vec!["x"; rust_parser::FILE_LINE_LIMIT + 5].join("\n");
         let mut messages = Vec::new();
 
-        check_file_length(Some(&before), rust_parser::FILE_LINE_LIMIT + 6, &mut messages);
+        check_file_length(
+            Some(&before),
+            rust_parser::FILE_LINE_LIMIT + 6,
+            &mut messages,
+        );
 
         assert_eq!(messages.len(), 1);
         assert!(messages[0].contains("max 750"));

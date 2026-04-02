@@ -10,7 +10,7 @@ fn temp_test_dir(name: &str) -> PathBuf {
         .unwrap()
         .as_nanos();
     let dir = std::env::temp_dir().join(format!("claude-fn-length-hook-{name}-{unique}"));
-    fs::create_dir_all(&dir).unwrap();
+    fs::create_dir_all(dir.join(".git")).unwrap();
     dir
 }
 
@@ -36,6 +36,10 @@ fn run_hook(payload: &serde_json::Value) -> std::process::Output {
     child.wait_with_output().unwrap()
 }
 
+fn read_plan(dir: &Path) -> String {
+    fs::read_to_string(dir.join("PLAN.md")).unwrap_or_default()
+}
+
 fn rust_function_with_counted_lines(name: &str, count: usize) -> String {
     let body = vec!["    let value = 1;"; count].join("\n");
     format!("fn {name}() {{\n{body}\n}}\n")
@@ -52,7 +56,7 @@ fn php_function_with_counted_lines(name: &str, count: usize) -> String {
 }
 
 #[test]
-fn write_payload_allows_small_rust_file_without_block_output() {
+fn write_payload_allows_small_rust_file_without_plan_entry() {
     let dir = temp_test_dir("write-allow");
     let file_path = dir.join("sample.rs");
 
@@ -68,12 +72,12 @@ fn write_payload_allows_small_rust_file_without_block_output() {
 
     assert!(output.status.success());
     assert!(String::from_utf8(output.stdout).unwrap().trim().is_empty());
-    assert!(String::from_utf8(output.stderr).unwrap().trim().is_empty());
+    assert!(read_plan(&dir).is_empty());
 }
 
 #[test]
-fn write_payload_blocks_oversized_rust_function_with_json_output() {
-    let dir = temp_test_dir("write-block");
+fn write_payload_adds_plan_todo_for_oversized_rust_function() {
+    let dir = temp_test_dir("write-plan");
     let file_path = dir.join("sample.rs");
 
     let payload = serde_json::json!({
@@ -86,15 +90,17 @@ fn write_payload_blocks_oversized_rust_function_with_json_output() {
 
     let output = run_hook(&payload);
     let stdout = String::from_utf8(output.stdout).unwrap();
+    let plan = read_plan(&dir);
 
     assert!(output.status.success());
-    assert!(stdout.contains("\"decision\":\"block\""));
-    assert!(stdout.contains("too_long_demo"));
+    assert!(stdout.trim().is_empty(), "should not block");
+    assert!(plan.contains("- [ ] Refactor"));
+    assert!(plan.contains("too_long_demo"));
 }
 
 #[test]
-fn edit_payload_simulates_updated_content_before_writing_to_disk() {
-    let dir = temp_test_dir("edit-block");
+fn edit_payload_adds_plan_todo_without_modifying_source_file() {
+    let dir = temp_test_dir("edit-plan");
     let file_path = dir.join("sample.rs");
     let original = rust_function_with_counted_lines("edit_demo", 2);
     let replacement = rust_function_with_counted_lines("edit_demo", 31);
@@ -111,11 +117,12 @@ fn edit_payload_simulates_updated_content_before_writing_to_disk() {
 
     let output = run_hook(&payload);
     let stdout = String::from_utf8(output.stdout).unwrap();
+    let plan = read_plan(&dir);
     let on_disk = fs::read_to_string(&file_path).unwrap();
 
     assert!(output.status.success());
-    assert!(stdout.contains("\"decision\":\"block\""));
-    assert!(stdout.contains("edit_demo"));
+    assert!(stdout.trim().is_empty(), "should not block");
+    assert!(plan.contains("edit_demo"));
     assert_eq!(on_disk, rust_function_with_counted_lines("edit_demo", 2));
 }
 
@@ -136,11 +143,12 @@ fn rust_test_fn_with_50_body_lines_is_allowed() {
 
     assert!(output.status.success());
     assert!(String::from_utf8(output.stdout).unwrap().trim().is_empty());
+    assert!(read_plan(&dir).is_empty());
 }
 
 #[test]
-fn rust_test_fn_with_201_body_lines_is_blocked() {
-    let dir = temp_test_dir("rust-test-block");
+fn rust_test_fn_with_201_body_lines_adds_plan_todo() {
+    let dir = temp_test_dir("rust-test-plan");
     let file_path = dir.join("sample.rs");
 
     let payload = serde_json::json!({
@@ -153,11 +161,12 @@ fn rust_test_fn_with_201_body_lines_is_blocked() {
 
     let output = run_hook(&payload);
     let stdout = String::from_utf8(output.stdout).unwrap();
+    let plan = read_plan(&dir);
 
     assert!(output.status.success());
-    assert!(stdout.contains("\"decision\":\"block\""));
-    assert!(stdout.contains("my_test"));
-    assert!(stdout.contains("max 200"));
+    assert!(stdout.trim().is_empty(), "should not block");
+    assert!(plan.contains("my_test"));
+    assert!(plan.contains("max 200"));
 }
 
 #[test]
@@ -177,4 +186,26 @@ fn php_test_file_with_50_line_function_is_allowed() {
 
     assert!(output.status.success());
     assert!(String::from_utf8(output.stdout).unwrap().trim().is_empty());
+    assert!(read_plan(&dir).is_empty());
+}
+
+#[test]
+fn duplicate_plan_todos_are_not_added() {
+    let dir = temp_test_dir("dedup");
+    let file_path = dir.join("sample.rs");
+
+    let payload = serde_json::json!({
+        "tool_name": "Write",
+        "tool_input": {
+            "file_path": file_path,
+            "content": rust_function_with_counted_lines("dup_fn", 31)
+        }
+    });
+
+    run_hook(&payload);
+    run_hook(&payload);
+
+    let plan = read_plan(&dir);
+    let count = plan.matches("dup_fn").count();
+    assert_eq!(count, 1, "should not duplicate TODO entries");
 }
