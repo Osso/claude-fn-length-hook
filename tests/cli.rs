@@ -209,3 +209,33 @@ fn duplicate_plan_todos_are_not_added() {
     let count = plan.matches("dup_fn").count();
     assert_eq!(count, 1, "should not duplicate TODO entries");
 }
+
+#[test]
+fn same_function_different_line_count_does_not_duplicate() {
+    let dir = temp_test_dir("dedup-lines");
+    let file_path = dir.join("sample.rs");
+
+    // First write: 35 body lines
+    let payload1 = serde_json::json!({
+        "tool_name": "Write",
+        "tool_input": {
+            "file_path": file_path,
+            "content": rust_function_with_counted_lines("growing_fn", 35)
+        }
+    });
+    run_hook(&payload1);
+
+    // Second write: 40 body lines (same function, different count)
+    let payload2 = serde_json::json!({
+        "tool_name": "Write",
+        "tool_input": {
+            "file_path": file_path,
+            "content": rust_function_with_counted_lines("growing_fn", 40)
+        }
+    });
+    run_hook(&payload2);
+
+    let plan = read_plan(&dir);
+    let count = plan.matches("growing_fn").count();
+    assert_eq!(count, 1, "same function with different line count should not duplicate");
+}

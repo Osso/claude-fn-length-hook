@@ -182,19 +182,31 @@ fn append_plan_todos(file_path: &str, messages: &[String]) {
     }
 
     let existing = fs::read_to_string(&plan_path).unwrap_or_default();
-    for todo in &todos {
-        if existing.contains(todo.trim_end()) {
+    let mut new_entries = Vec::new();
+    for (todo, msg) in todos.iter().zip(messages.iter()) {
+        // Dedup key: file path + function name (ignore line number and body count)
+        let fn_name = msg.split(" (line ").next().unwrap_or(msg);
+        let dedup_key = format!("Refactor `{}`: {}", short, fn_name);
+        if existing.contains(&dedup_key) {
             continue;
         }
-        let mut file = match OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&plan_path)
-        {
-            Ok(f) => f,
-            Err(_) => return,
-        };
-        let _ = file.write_all(todo.as_bytes());
+        new_entries.push(todo.as_str());
+    }
+
+    if new_entries.is_empty() {
+        return;
+    }
+
+    let mut file = match OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&plan_path)
+    {
+        Ok(f) => f,
+        Err(_) => return,
+    };
+    for entry in &new_entries {
+        let _ = file.write_all(entry.as_bytes());
     }
 }
 
