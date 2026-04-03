@@ -239,3 +239,82 @@ fn same_function_different_line_count_does_not_duplicate() {
     let count = plan.matches("growing_fn").count();
     assert_eq!(count, 1, "same function with different line count should not duplicate");
 }
+
+#[test]
+fn different_functions_in_same_file_both_appear() {
+    let dir = temp_test_dir("dedup-diff-fns");
+    let file_path = dir.join("sample.rs");
+
+    let content = format!(
+        "{}\n{}",
+        rust_function_with_counted_lines("alpha", 35),
+        rust_function_with_counted_lines("beta", 40),
+    );
+    let payload = serde_json::json!({
+        "tool_name": "Write",
+        "tool_input": {
+            "file_path": file_path,
+            "content": content
+        }
+    });
+
+    run_hook(&payload);
+
+    let plan = read_plan(&dir);
+    assert!(plan.contains("alpha"), "first function should appear");
+    assert!(plan.contains("beta"), "second function should appear");
+}
+
+#[test]
+fn same_function_name_in_different_files_both_appear() {
+    let dir = temp_test_dir("dedup-diff-files");
+    let file_a = dir.join("a.rs");
+    let file_b = dir.join("b.rs");
+
+    let payload_a = serde_json::json!({
+        "tool_name": "Write",
+        "tool_input": {
+            "file_path": file_a,
+            "content": rust_function_with_counted_lines("shared_name", 35)
+        }
+    });
+    let payload_b = serde_json::json!({
+        "tool_name": "Write",
+        "tool_input": {
+            "file_path": file_b,
+            "content": rust_function_with_counted_lines("shared_name", 35)
+        }
+    });
+
+    run_hook(&payload_a);
+    run_hook(&payload_b);
+
+    let plan = read_plan(&dir);
+    let count = plan.matches("shared_name").count();
+    assert_eq!(count, 2, "same function in different files should both appear");
+}
+
+#[test]
+fn completed_plan_entry_still_deduplicates() {
+    let dir = temp_test_dir("dedup-checked");
+    let file_path = dir.join("sample.rs");
+
+    // Pre-populate PLAN.md with a checked-off entry for this function
+    let checked_entry =
+        "- [x] Refactor `sample.rs`: done_fn (line 1): 35 body lines (max 30) — extract into helper functions\n";
+    fs::write(dir.join("PLAN.md"), checked_entry).unwrap();
+
+    let payload = serde_json::json!({
+        "tool_name": "Write",
+        "tool_input": {
+            "file_path": file_path,
+            "content": rust_function_with_counted_lines("done_fn", 40)
+        }
+    });
+
+    run_hook(&payload);
+
+    let plan = read_plan(&dir);
+    let count = plan.matches("done_fn").count();
+    assert_eq!(count, 1, "should not re-add entry for already-completed function");
+}
