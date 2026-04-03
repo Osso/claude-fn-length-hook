@@ -184,9 +184,7 @@ fn append_plan_todos(file_path: &str, messages: &[String]) {
     let existing = fs::read_to_string(&plan_path).unwrap_or_default();
     let mut new_entries = Vec::new();
     for (todo, msg) in todos.iter().zip(messages.iter()) {
-        // Dedup key: file path + function name (ignore line number and body count)
-        let fn_name = msg.split(" (line ").next().unwrap_or(msg);
-        let dedup_key = format!("Refactor `{}`: {}", short, fn_name);
+        let dedup_key = build_dedup_key(&short, msg);
         if existing.contains(&dedup_key) {
             continue;
         }
@@ -208,6 +206,17 @@ fn append_plan_todos(file_path: &str, messages: &[String]) {
     for entry in &new_entries {
         let _ = file.write_all(entry.as_bytes());
     }
+}
+
+/// Build a stable dedup key from file path + message.
+/// For function violations: uses file + function name (strips line number and body count).
+/// For file-level warnings: uses file + "File is over limit" (strips the variable line count).
+fn build_dedup_key(short_path: &str, msg: &str) -> String {
+    if msg.starts_with("File is ") {
+        return format!("Refactor `{}`: File is", short_path);
+    }
+    let fn_name = msg.split(" (line ").next().unwrap_or(msg);
+    format!("Refactor `{}`: {}", short_path, fn_name)
 }
 
 #[cfg(test)]
@@ -266,5 +275,28 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         assert!(messages[0].contains("max 750"));
+    }
+
+    #[test]
+    fn dedup_key_strips_line_count_from_file_warning() {
+        let key1 = build_dedup_key("src/foo.rs", "File is 845 lines (max 750). Consider splitting it.");
+        let key2 = build_dedup_key("src/foo.rs", "File is 932 lines (max 750). Consider splitting it.");
+        assert_eq!(key1, key2);
+        assert_eq!(key1, "Refactor `src/foo.rs`: File is");
+    }
+
+    #[test]
+    fn dedup_key_uses_fn_name_for_function_violations() {
+        let key1 = build_dedup_key("src/foo.rs", "my_func (line 10): 35 body lines (max 30)");
+        let key2 = build_dedup_key("src/foo.rs", "my_func (line 15): 40 body lines (max 30)");
+        assert_eq!(key1, key2);
+        assert_eq!(key1, "Refactor `src/foo.rs`: my_func");
+    }
+
+    #[test]
+    fn dedup_key_different_functions_differ() {
+        let key1 = build_dedup_key("src/foo.rs", "func_a (line 10): 35 body lines (max 30)");
+        let key2 = build_dedup_key("src/foo.rs", "func_b (line 50): 35 body lines (max 30)");
+        assert_ne!(key1, key2);
     }
 }
