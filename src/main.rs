@@ -95,10 +95,21 @@ fn check_rust(before: Option<&str>, after: &str) -> Vec<String> {
         } else {
             rust_parser::BODY_LIMIT
         };
-        messages.push(format!(
-            "{} (line {}): {} body lines (max {})",
-            v.name, v.line, v.body_lines, limit
-        ));
+        if v.body_lines > limit {
+            messages.push(format!(
+                "{} (line {}): {} body lines (max {})",
+                v.name, v.line, v.body_lines, limit
+            ));
+        }
+        if !v.is_test && v.max_nesting > rust_parser::NESTING_LIMIT {
+            messages.push(format!(
+                "{} (line {}): nesting depth {} (max {})",
+                v.name,
+                v.line,
+                v.max_nesting,
+                rust_parser::NESTING_LIMIT
+            ));
+        }
     }
 
     check_file_length(before, result.file_lines, &mut messages);
@@ -216,7 +227,11 @@ fn build_dedup_key(short_path: &str, msg: &str) -> String {
         return format!("Refactor `{}`: File is", short_path);
     }
     let fn_name = msg.split(" (line ").next().unwrap_or(msg);
-    format!("Refactor `{}`: {}", short_path, fn_name)
+    if msg.contains("nesting depth") {
+        format!("Refactor `{}`: {} nesting", short_path, fn_name)
+    } else {
+        format!("Refactor `{}`: {}", short_path, fn_name)
+    }
 }
 
 #[cfg(test)]
@@ -279,8 +294,14 @@ mod tests {
 
     #[test]
     fn dedup_key_strips_line_count_from_file_warning() {
-        let key1 = build_dedup_key("src/foo.rs", "File is 845 lines (max 750). Consider splitting it.");
-        let key2 = build_dedup_key("src/foo.rs", "File is 932 lines (max 750). Consider splitting it.");
+        let key1 = build_dedup_key(
+            "src/foo.rs",
+            "File is 845 lines (max 750). Consider splitting it.",
+        );
+        let key2 = build_dedup_key(
+            "src/foo.rs",
+            "File is 932 lines (max 750). Consider splitting it.",
+        );
         assert_eq!(key1, key2);
         assert_eq!(key1, "Refactor `src/foo.rs`: File is");
     }
@@ -297,6 +318,13 @@ mod tests {
     fn dedup_key_different_functions_differ() {
         let key1 = build_dedup_key("src/foo.rs", "func_a (line 10): 35 body lines (max 30)");
         let key2 = build_dedup_key("src/foo.rs", "func_b (line 50): 35 body lines (max 30)");
+        assert_ne!(key1, key2);
+    }
+
+    #[test]
+    fn dedup_key_nesting_differs_from_body_lines() {
+        let key1 = build_dedup_key("src/foo.rs", "my_func (line 10): 35 body lines (max 30)");
+        let key2 = build_dedup_key("src/foo.rs", "my_func (line 10): nesting depth 5 (max 4)");
         assert_ne!(key1, key2);
     }
 }

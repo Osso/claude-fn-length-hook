@@ -3,6 +3,7 @@ use crate::lines::is_countable;
 pub const BODY_LIMIT: usize = 30;
 pub const TEST_BODY_LIMIT: usize = 200;
 pub const FILE_LINE_LIMIT: usize = 750;
+pub const NESTING_LIMIT: usize = 4;
 
 #[derive(Debug)]
 pub struct Violation {
@@ -10,6 +11,7 @@ pub struct Violation {
     pub line: usize,
     pub body_lines: usize,
     pub is_test: bool,
+    pub max_nesting: usize,
 }
 
 pub struct RustViolations {
@@ -44,7 +46,8 @@ fn find_fn_violations(lines: &[&str]) -> Vec<Violation> {
             } else {
                 BODY_LIMIT
             };
-            if viol.body_lines > limit {
+            let nesting_exceeds = !viol.is_test && viol.max_nesting > NESTING_LIMIT;
+            if viol.body_lines > limit || nesting_exceeds {
                 violations.push(viol);
             }
         } else {
@@ -74,7 +77,7 @@ fn try_parse_fn(lines: &[&str], i: &mut usize, in_block_comment: &mut bool) -> O
     // Find opening brace of function body (may be on same line or next few)
     let open_idx = find_opening_brace(lines, *i)?;
 
-    let (body_lines, close_idx) = count_body(lines, open_idx);
+    let (body_lines, max_nesting, close_idx) = count_body(lines, open_idx);
 
     *i = close_idx + 1;
     Some(Violation {
@@ -82,6 +85,7 @@ fn try_parse_fn(lines: &[&str], i: &mut usize, in_block_comment: &mut bool) -> O
         line: fn_line + 1,
         body_lines,
         is_test,
+        max_nesting,
     })
 }
 
@@ -148,10 +152,12 @@ fn find_opening_brace(lines: &[&str], start: usize) -> Option<usize> {
 }
 
 /// Count body lines inside braces starting at `open_line`.
-/// Returns (countable body lines, index of closing brace line).
-fn count_body(lines: &[&str], open_line: usize) -> (usize, usize) {
+/// Returns (countable body lines, max nesting depth, index of closing brace line).
+/// Max nesting depth subtracts 1 so the fn body itself is depth 0.
+fn count_body(lines: &[&str], open_line: usize) -> (usize, usize, usize) {
     let mut depth = 0i32;
     let mut body_count = 0usize;
+    let mut max_depth = 0i32;
     let mut in_bc = false;
     let mut in_string = false;
     let mut string_char = '"';
@@ -166,16 +172,23 @@ fn count_body(lines: &[&str], open_line: usize) -> (usize, usize) {
             &mut string_char,
         );
 
+        if depth > max_depth {
+            max_depth = depth;
+        }
+
         // Count lines that are inside the body (depth > 0 before this line opened)
         if offset > 0 && depth > 0 && is_countable(line, &mut in_bc.clone()) {
             body_count += 1;
         }
 
         if depth == 0 && offset > 0 {
-            return (body_count, idx);
+            // Subtract 1: depth 1 = fn body itself, so inner nesting starts at 2
+            let max_nesting = (max_depth - 1).max(0) as usize;
+            return (body_count, max_nesting, idx);
         }
     }
-    (body_count, lines.len().saturating_sub(1))
+    let max_nesting = (max_depth - 1).max(0) as usize;
+    (body_count, max_nesting, lines.len().saturating_sub(1))
 }
 
 /// Update brace depth and string/block-comment state for one line.
@@ -305,5 +318,20 @@ mod tests {
     fn preceding_lines_have_test_attr_returns_false_for_normal_fn() {
         let lines: Vec<&str> = "fn normal() {}".lines().collect();
         assert!(!preceding_lines_have_test_attr(&lines, 0));
+    }
+
+    #[test]
+    fn detects_deep_nesting() {
+        let source = "fn deep() {\n    if true {\n        if true {\n            if true {\n                if true {\n                    if true {\n                        let x = 1;\n                    }\n                }\n            }\n        }\n    }\n}\n";
+        let result = check(source);
+        assert_eq!(result.fn_violations.len(), 1);
+        assert!(result.fn_violations[0].max_nesting > NESTING_LIMIT);
+    }
+
+    #[test]
+    fn allows_moderate_nesting() {
+        let source = "fn shallow() {\n    if true {\n        if true {\n            let x = 1;\n        }\n    }\n}\n";
+        let result = check(source);
+        assert!(result.fn_violations.is_empty());
     }
 }
