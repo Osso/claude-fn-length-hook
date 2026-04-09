@@ -1,8 +1,11 @@
+mod brace_scan;
 mod lines;
 mod php_parser;
 mod rust_parser;
 
 use serde::Deserialize;
+use std::borrow::Cow;
+use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write as IoWrite};
 use std::path::{Path, PathBuf};
@@ -173,50 +176,14 @@ fn find_project_root(file_path: &str) -> Option<PathBuf> {
 }
 
 fn append_plan_todos(file_path: &str, messages: &[String]) {
-    let root = match find_project_root(file_path) {
-        Some(r) => r,
-        None => return,
+    let Some(root) = find_project_root(file_path) else {
+        return;
     };
     let plan_path = root.join("PLAN.md");
-    let short = Path::new(file_path)
-        .strip_prefix(&root)
-        .unwrap_or(Path::new(file_path))
-        .to_string_lossy();
-
-    let mut todos = Vec::new();
-    for msg in messages {
-        let todo = format!(
-            "- [ ] Refactor `{}`: {} — extract into helper functions\n",
-            short, msg
-        );
-        todos.push(todo);
-    }
-
-    let existing = fs::read_to_string(&plan_path).unwrap_or_default();
-    let mut new_entries = Vec::new();
-    for (todo, msg) in todos.iter().zip(messages.iter()) {
-        let dedup_key = build_dedup_key(&short, msg);
-        if existing.contains(&dedup_key) {
-            continue;
-        }
-        new_entries.push(todo.as_str());
-    }
-
-    if new_entries.is_empty() {
-        return;
-    }
-
-    let mut file = match OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&plan_path)
-    {
-        Ok(f) => f,
-        Err(_) => return,
-    };
-    for entry in &new_entries {
-        let _ = file.write_all(entry.as_bytes());
-    }
+    let short = short_file_path(file_path, &root);
+    let existing_keys = read_existing_plan_keys(&plan_path);
+    let new_entries = build_new_plan_entries(short.as_ref(), messages, &existing_keys);
+    write_plan_entries(&plan_path, &new_entries);
 }
 
 /// Build a stable dedup key from file path + message.
@@ -231,6 +198,74 @@ fn build_dedup_key(short_path: &str, msg: &str) -> String {
         format!("Refactor `{}`: {} nesting", short_path, fn_name)
     } else {
         format!("Refactor `{}`: {}", short_path, fn_name)
+    }
+}
+
+fn short_file_path<'a>(file_path: &'a str, root: &Path) -> Cow<'a, str> {
+    Path::new(file_path)
+        .strip_prefix(root)
+        .unwrap_or(Path::new(file_path))
+        .to_string_lossy()
+}
+
+fn read_existing_plan_keys(plan_path: &Path) -> HashSet<String> {
+    let plan_contents = fs::read_to_string(plan_path).unwrap_or_default();
+    extract_plan_keys(&plan_contents)
+}
+
+fn extract_plan_keys(plan_contents: &str) -> HashSet<String> {
+    plan_contents.lines().filter_map(extract_plan_key).collect()
+}
+
+fn extract_plan_key(line: &str) -> Option<String> {
+    let task = line
+        .strip_prefix("- [ ] ")
+        .or_else(|| line.strip_prefix("- [x] "))?;
+    Some(normalize_plan_task_key(task))
+}
+
+fn build_new_plan_entries(
+    short_path: &str,
+    messages: &[String],
+    existing_keys: &HashSet<String>,
+) -> Vec<String> {
+    messages
+        .iter()
+        .filter_map(|message| {
+            let dedup_key = build_dedup_key(short_path, message);
+            (!existing_keys.contains(&dedup_key)).then(|| {
+                format!(
+                    "- [ ] Refactor `{}`: {} — extract into helper functions\n",
+                    short_path, message
+                )
+            })
+        })
+        .collect()
+}
+
+fn normalize_plan_task_key(task: &str) -> String {
+    let normalized_task = task.split(" — ").next().unwrap_or(task);
+    let Some(rest) = normalized_task.strip_prefix("Refactor `") else {
+        return normalized_task.to_string();
+    };
+    let Some((short_path, message)) = rest.split_once("`: ") else {
+        return normalized_task.to_string();
+    };
+    build_dedup_key(short_path, message)
+}
+
+fn write_plan_entries(plan_path: &Path, entries: &[String]) {
+    if entries.is_empty() {
+        return;
+    }
+
+    let mut file = match OpenOptions::new().create(true).append(true).open(plan_path) {
+        Ok(file) => file,
+        Err(_) => return,
+    };
+
+    for entry in entries {
+        let _ = file.write_all(entry.as_bytes());
     }
 }
 
@@ -326,5 +361,44 @@ mod tests {
         let key1 = build_dedup_key("src/foo.rs", "my_func (line 10): 35 body lines (max 30)");
         let key2 = build_dedup_key("src/foo.rs", "my_func (line 10): nesting depth 5 (max 4)");
         assert_ne!(key1, key2);
+    }
+
+    #[test]
+    fn extract_plan_key_ignores_checkbox_and_suffix() {
+        let line = "- [ ] Refactor `src/foo.rs`: my_func — extract into helper functions";
+        assert_eq!(
+            extract_plan_key(line).as_deref(),
+            Some("Refactor `src/foo.rs`: my_func")
+        );
+    }
+
+    #[test]
+    fn build_new_plan_entries_skips_existing_refactor_items() {
+        let mut existing_keys = HashSet::new();
+        existing_keys.insert("Refactor `src/foo.rs`: my_func".to_string());
+
+        let entries = build_new_plan_entries(
+            "src/foo.rs",
+            &[
+                "my_func (line 10): 35 body lines (max 30)".to_string(),
+                "other_func (line 20): 40 body lines (max 30)".to_string(),
+            ],
+            &existing_keys,
+        );
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0],
+            "- [ ] Refactor `src/foo.rs`: other_func (line 20): 40 body lines (max 30) — extract into helper functions\n"
+        );
+    }
+
+    #[test]
+    fn normalize_plan_task_key_removes_variable_line_details() {
+        let task = "Refactor `src/foo.rs`: my_func (line 15): 40 body lines (max 30) — extract into helper functions";
+        assert_eq!(
+            normalize_plan_task_key(task),
+            "Refactor `src/foo.rs`: my_func"
+        );
     }
 }

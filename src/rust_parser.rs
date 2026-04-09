@@ -1,9 +1,11 @@
-use crate::lines::is_countable;
+use crate::{brace_scan::BraceScanState, lines::is_countable};
 
 pub const BODY_LIMIT: usize = 30;
 pub const TEST_BODY_LIMIT: usize = 200;
 pub const FILE_LINE_LIMIT: usize = 750;
 pub const NESTING_LIMIT: usize = 4;
+const BRACE_LOOKAHEAD_LINES: usize = 10;
+const OPEN_BRACE_BYTE: u8 = b'{';
 
 #[derive(Debug)]
 pub struct Violation {
@@ -148,104 +150,84 @@ fn find_keyword_position(line: &str, keyword: &str) -> Option<usize> {
 
 /// Scan forward from `start` to find the `{` that opens the function body.
 fn find_opening_brace(lines: &[&str], start: usize) -> Option<usize> {
-    (start..lines.len().min(start + 10)).find(|&i| lines[i].contains('{'))
+    let end = lines.len().min(start + BRACE_LOOKAHEAD_LINES);
+
+    for (index, line) in lines.iter().enumerate().take(end).skip(start) {
+        if line.as_bytes().contains(&OPEN_BRACE_BYTE) {
+            return Some(index);
+        }
+    }
+
+    None
 }
 
 /// Count body lines inside braces starting at `open_line`.
 /// Returns (countable body lines, max nesting depth, index of closing brace line).
 /// Max nesting depth subtracts 1 so the fn body itself is depth 0.
 fn count_body(lines: &[&str], open_line: usize) -> (usize, usize, usize) {
-    let mut depth = 0i32;
-    let mut body_count = 0usize;
-    let mut max_depth = 0i32;
-    let mut in_bc = false;
-    let mut in_string = false;
-    let mut string_char = '"';
+    let mut scan = RustBodyScan::default();
 
     for (offset, line) in lines[open_line..].iter().enumerate() {
         let idx = open_line + offset;
-        update_string_and_depth(
-            line,
-            &mut depth,
-            &mut in_bc,
-            &mut in_string,
-            &mut string_char,
-        );
+        scan.scan_line(line, offset);
 
-        if depth > max_depth {
-            max_depth = depth;
-        }
-
-        // Count lines that are inside the body (depth > 0 before this line opened)
-        if offset > 0 && depth > 0 && is_countable(line, &mut in_bc.clone()) {
-            body_count += 1;
-        }
-
-        if depth == 0 && offset > 0 {
-            // Subtract 1: depth 1 = fn body itself, so inner nesting starts at 2
-            let max_nesting = (max_depth - 1).max(0) as usize;
-            return (body_count, max_nesting, idx);
+        if scan.body_closed(offset) {
+            return scan.finish(idx);
         }
     }
-    let max_nesting = (max_depth - 1).max(0) as usize;
-    (body_count, max_nesting, lines.len().saturating_sub(1))
-}
-
-/// Update brace depth and string/block-comment state for one line.
-fn update_string_and_depth(
-    line: &str,
-    depth: &mut i32,
-    in_bc: &mut bool,
-    in_string: &mut bool,
-    string_char: &mut char,
-) {
-    let chars: Vec<char> = line.chars().collect();
-    let mut j = 0;
-    while j < chars.len() {
-        if *in_bc {
-            if j + 1 < chars.len() && chars[j] == '*' && chars[j + 1] == '/' {
-                *in_bc = false;
-                j += 2;
-                continue;
-            }
-        } else if *in_string {
-            if chars[j] == '\\' {
-                j += 2;
-                continue;
-            }
-            if chars[j] == *string_char {
-                *in_string = false;
-            }
-        } else if j + 1 < chars.len() && chars[j] == '/' && chars[j + 1] == '*' {
-            *in_bc = true;
-            j += 2;
-            continue;
-        } else if j + 1 < chars.len() && chars[j] == '/' && chars[j + 1] == '/' {
-            break; // rest of line is comment
-        } else if chars[j] == '"' || chars[j] == '\'' {
-            *in_string = true;
-            *string_char = chars[j];
-        } else if chars[j] == '{' {
-            *depth += 1;
-        } else if chars[j] == '}' {
-            *depth -= 1;
-        }
-        j += 1;
-    }
+    scan.finish(lines.len().saturating_sub(1))
 }
 
 /// Update block-comment state for a line (used outside fn parsing).
 fn update_block_comment_state(line: &str, in_bc: &mut bool) {
-    let mut dummy_depth = 0i32;
-    let mut dummy_str = false;
-    let mut dummy_char = '"';
-    update_string_and_depth(
-        line,
-        &mut dummy_depth,
-        in_bc,
-        &mut dummy_str,
-        &mut dummy_char,
-    );
+    let mut scan = BraceScanState {
+        in_block_comment: *in_bc,
+        ..BraceScanState::default()
+    };
+    scan.scan_line(line, false);
+    *in_bc = scan.in_block_comment;
+}
+
+#[derive(Default)]
+struct RustBodyScan {
+    body_lines: usize,
+    max_depth: i32,
+    state: BraceScanState,
+}
+
+impl RustBodyScan {
+    fn scan_line(&mut self, line: &str, offset: usize) {
+        let countable_block_comment = self.state.in_block_comment;
+        self.state.scan_line(line, false);
+        self.max_depth = self.max_depth.max(self.state.depth);
+
+        if should_count_body_line(offset, self.state.depth)
+            && is_countable_with_state(line, countable_block_comment)
+        {
+            self.body_lines += 1;
+        }
+    }
+
+    fn body_closed(&self, offset: usize) -> bool {
+        offset > 0 && self.state.depth == 0
+    }
+
+    fn finish(&self, close_idx: usize) -> (usize, usize, usize) {
+        (self.body_lines, max_nesting(self.max_depth), close_idx)
+    }
+}
+
+fn should_count_body_line(offset: usize, depth: i32) -> bool {
+    offset > 0 && depth > 0
+}
+
+fn is_countable_with_state(line: &str, in_block_comment: bool) -> bool {
+    let mut in_block_comment = in_block_comment;
+    is_countable(line, &mut in_block_comment)
+}
+
+fn max_nesting(max_depth: i32) -> usize {
+    (max_depth - 1).max(0) as usize
 }
 
 #[cfg(test)]

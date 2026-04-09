@@ -1,8 +1,10 @@
-use crate::lines::is_countable;
+use crate::{brace_scan::BraceScanState, lines::is_countable};
 use std::collections::HashMap;
 
 pub const BODY_LIMIT: usize = 30;
 pub const TEST_BODY_LIMIT: usize = 200;
+const BRACE_LOOKAHEAD_LINES: usize = 10;
+const OPEN_BRACE_BYTE: u8 = b'{';
 
 #[derive(Debug)]
 pub struct Violation {
@@ -123,90 +125,71 @@ fn find_keyword_position(line: &str, keyword: &str) -> Option<usize> {
 
 /// Find the `{` that opens a function body, scanning up to 10 lines forward.
 fn find_opening_brace(lines: &[&str], start: usize) -> Option<usize> {
-    (start..lines.len().min(start + 10)).find(|&i| lines[i].contains('{'))
+    let end = lines.len().min(start + BRACE_LOOKAHEAD_LINES);
+
+    for (index, line) in lines.iter().enumerate().take(end).skip(start) {
+        if line.as_bytes().contains(&OPEN_BRACE_BYTE) {
+            return Some(index);
+        }
+    }
+
+    None
 }
 
 /// Count countable body lines inside the brace block starting at `open_line`.
 fn count_body(lines: &[&str], open_line: usize) -> (usize, usize) {
-    let mut depth = 0i32;
-    let mut body_count = 0usize;
-    let mut in_bc = false;
-    let mut in_string = false;
-    let mut string_char = '"';
+    let mut scan = PhpBodyScan::default();
 
     for (offset, line) in lines[open_line..].iter().enumerate() {
         let idx = open_line + offset;
-        update_depth(
-            line,
-            &mut depth,
-            &mut in_bc,
-            &mut in_string,
-            &mut string_char,
-        );
+        scan.scan_line(line, offset);
 
-        if offset > 0 && depth > 0 {
-            let mut bc_clone = in_bc;
-            if is_countable(line, &mut bc_clone) {
-                body_count += 1;
-            }
-        }
-
-        if depth == 0 && offset > 0 {
-            return (body_count, idx);
+        if scan.body_closed(offset) {
+            return (scan.body_lines, idx);
         }
     }
-    (body_count, lines.len().saturating_sub(1))
-}
-
-fn update_depth(
-    line: &str,
-    depth: &mut i32,
-    in_bc: &mut bool,
-    in_string: &mut bool,
-    string_char: &mut char,
-) {
-    let chars: Vec<char> = line.chars().collect();
-    let mut j = 0;
-    while j < chars.len() {
-        if *in_bc {
-            if j + 1 < chars.len() && chars[j] == '*' && chars[j + 1] == '/' {
-                *in_bc = false;
-                j += 2;
-                continue;
-            }
-        } else if *in_string {
-            if chars[j] == '\\' {
-                j += 2;
-                continue;
-            }
-            if chars[j] == *string_char {
-                *in_string = false;
-            }
-        } else if j + 1 < chars.len() && chars[j] == '/' && chars[j + 1] == '*' {
-            *in_bc = true;
-            j += 2;
-            continue;
-        } else if j + 1 < chars.len() && chars[j] == '/' && chars[j + 1] == '/' {
-            break;
-        } else if chars[j] == '#' {
-            break; // PHP single-line comment
-        } else if chars[j] == '"' || chars[j] == '\'' {
-            *in_string = true;
-            *string_char = chars[j];
-        } else if chars[j] == '{' {
-            *depth += 1;
-        } else if chars[j] == '}' {
-            *depth -= 1;
-        }
-        j += 1;
-    }
+    (scan.body_lines, lines.len().saturating_sub(1))
 }
 
 fn update_block_comment_state(line: &str, in_bc: &mut bool) {
-    let mut dummy = 0i32;
-    let mut dummy_str = false;
-    let mut dummy_char = '"';
-    update_depth(line, &mut dummy, in_bc, &mut dummy_str, &mut dummy_char);
+    let mut scan = BraceScanState {
+        in_block_comment: *in_bc,
+        ..BraceScanState::default()
+    };
+    scan.scan_line(line, true);
+    *in_bc = scan.in_block_comment;
+}
+
+#[derive(Default)]
+struct PhpBodyScan {
+    body_lines: usize,
+    state: BraceScanState,
+}
+
+impl PhpBodyScan {
+    fn scan_line(&mut self, line: &str, offset: usize) {
+        let countable_block_comment = self.state.in_block_comment;
+        self.state.scan_line(line, true);
+
+        if should_count_body_line(offset, self.state.depth)
+            && is_countable_with_state(line, countable_block_comment)
+        {
+            self.body_lines += 1;
+        }
+    }
+
+    fn body_closed(&self, offset: usize) -> bool {
+        offset > 0 && self.state.depth == 0
+    }
+}
+
+fn should_count_body_line(offset: usize, depth: i32) -> bool {
+    offset > 0 && depth > 0
+}
+
+fn is_countable_with_state(line: &str, in_block_comment: bool) -> bool {
+    let mut in_block_comment = in_block_comment;
+    is_countable(line, &mut in_block_comment)
 }
 
 #[cfg(test)]
